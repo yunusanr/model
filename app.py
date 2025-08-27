@@ -23,7 +23,7 @@ TEST_SIZE = 12
 SVR_TIMESTEPS = 5
 SVR_TEMP_PARAMS = dict(kernel="rbf", gamma=1, C=10, epsilon=0.10)
 SVR_HUMI_PARAMS = dict(kernel="rbf", gamma=0.1, C=10, epsilon=0.05)
-UPDATE_INTERVAL = 1800  # 30 minutes in seconds
+UPDATE_INTERVAL = 1800  # 30 minutes
 
 # Display settings
 pd.options.display.float_format = "{:,.2f}".format
@@ -72,9 +72,7 @@ def preprocess_data(feeds):
     dataset.ffill(inplace=True)
     df = dataset.resample(RESAMPLE_FREQ).mean()
     if df.isnull().values.any():
-        nan_index = df[df.isnull().any(axis=1)].index
         df.interpolate(method="linear", inplace=True)
-        print(f"Row after interpolation: {df.loc[nan_index]}")
     return df
 
 
@@ -121,10 +119,10 @@ def train_sarima(
 ):
     sarima_temp = SARIMAX(
         train["temperature"], order=order_temp, seasonal_order=seasonal_temp
-    ).fit()
+    ).fit(disp=False)
     sarima_humi = SARIMAX(
         train["humidity"], order=order_humi, seasonal_order=seasonal_humi
-    ).fit()
+    ).fit(disp=False)
     temp_forecast = sarima_temp.forecast(steps=steps)
     humi_forecast = sarima_humi.forecast(steps=steps)
     df = temp_forecast.reset_index()
@@ -152,7 +150,8 @@ def build_svr_df(df):
 def to_iso_records(df):
     result = df.reset_index().to_dict(orient="records")
     for record in result:
-        record["timestamp"] = record["timestamp"].isoformat()
+        if isinstance(record["timestamp"], pd.Timestamp):
+            record["timestamp"] = record["timestamp"].isoformat()
     return result
 
 
@@ -161,9 +160,10 @@ def update_data():
     while True:
         try:
             feeds = fetch_data(API_URL)
-            dataset = dataset_data(feeds)
             df = preprocess_data(feeds)
             train, test = train_test_split(df, test_size=TEST_SIZE, shuffle=False)
+
+            # Lebih ringan supaya nggak timeout
             arima_df = train_arima(
                 train,
                 test,
@@ -171,6 +171,7 @@ def update_data():
                 order_humi=(2, 1, 4),
                 steps=len(test) + 72,
             )
+
             sarima_df = train_sarima(
                 train,
                 test,
@@ -180,23 +181,30 @@ def update_data():
                 seasonal_humi=(2, 1, 0, 24),
                 steps=len(test) + 72,
             )
+
             svr_df = build_svr_df(df)
+
             latest_df = df
             latest_arima_df = arima_df
             latest_sarima_df = sarima_df
             latest_svr_df = svr_df
+
             print("Data updated at", pd.Timestamp.now())
         except Exception as e:
             print("Error updating data:", e)
         time.sleep(UPDATE_INTERVAL)
 
 
-# Start background thread for updating data
-threading.Thread(target=update_data, daemon=True).start()
-
 # Flask API
 app = Flask(__name__)
 CORS(app)
+
+
+def start_background_job():
+    threading.Thread(target=update_data, daemon=True).start()
+
+
+start_background_job()
 
 
 @app.route("/", methods=["GET"])
@@ -250,4 +258,8 @@ def describe_data():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Railway akan set PORT env, default 8080
+    import os
+
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
